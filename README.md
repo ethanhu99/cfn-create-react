@@ -1,8 +1,14 @@
 # AWS CloudFormation Create React Template
-A template file for creating a react website using S3 buckets, Cloudfront, CodeBuild, and CodePipeline.
+A template file for creating a static react website using S3 buckets, Cloudfront, CodeBuild, and CodePipeline.
+
+## Requirements
+- AWS CLI
+- Python
+- jq
+- Docker
 
 ## Usage
-
+Commands:
 ```
 make                    - builds a zip file to target/.
 make test               - execute the tests, requires a working AWS connection.
