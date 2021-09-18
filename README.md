@@ -3,6 +3,7 @@ A template file for creating a react website using S3 buckets, Cloudfront, CodeB
 
 ## Usage
 
+```
 make                    - builds a zip file to target/.
 make test               - execute the tests, requires a working AWS connection.
 
@@ -18,3 +19,4 @@ make demo               - deploys the demo cloudformation stack.
 make delete-demo        - deletes the demo cloudformation stack.
 
 make clean              - the workspace.
+```
