@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  'AWS CloudFormation Stack template that creates and hosts a react website using S3 buckets, Cloudfront, CodeBuild, and CodePipeline.'
+Parameters:
+  GithubSource:
+    Type: String
+    Default: https://github.com/ethanhu-dev/my-app
+    Description: Source control URL (e.g. Github)
+  GithubOwner:
+    Type: String
+    Default: ethanhu-dev
+  GithubRepo:
+    Type: String
+    Default: my-app
+    Description: Source respository - e.g. my-app
+  GithubOAuthToken:
+    Type: String
+    Description: Github personal access token
+  GithubBranch:
+    Type: String
+    Default: master
+    Description: Source branch - e.g. master or main
+  DomainName:
+    Type: String
+    Default: caligo.link
+    Description: Custom domain name URL - e.g. example.com
+  SubDomain:
+    Type: String
+    Default: www
+    Description: Sub domain of custom URL - e.g. www
+    AllowedPattern: ^[^.]*$
+  Region:
+    Type: String
+    Default: us-east-1
+  CertificateARN:
+    Type: String
+    Default: arn:aws:acm:us-east-1:419106351775:certificate/da0a429e-f266-4583-861b-7a334886e424
+    Description: SSL certificate ARN, must be from us-east-1
+  CreateApex:
+    Type: String
+    Description: "Create apex config in Route 53, options: 'yes'/'no'"
+Conditions:
+  CreateApexConfig: !Equals [!Ref CreateApex, 'yes']
+Resources:
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AWS::StackName}.CodePipeline
+      RoleArn: !GetAtt CodePipeLineRole.Arn
+      ArtifactStore:
+        Location: PipelineBucket
+        Type: S3
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              OutputArtifacts:
+                - Name: AppSource
+              Configuration:
+                Owner: GithubOwner
+                Repo: GithubRepo
+                Branch: GithubBranch
+                OAuthToken: GithubOAuthToken
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              InputArtifacts:
+                - Name: AppSource
+              OutputArtifacts:
+                - Name: AppBuild
+              Configuration:
+                ProjectName: !Ref CodeBuild
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: pipeline
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}_CodeBuildProject
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+        Name: AppProject
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/standard:2.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub >
+          version: 0.1
+          phases:
+            pre_build:
+              commands:
+                - echo Installing source NPM dependencies...
+                - npm install
+            build:
+              commands:
+                - echo Build started on `date`
+                - npm run build
+            post_build:
+              on-failure: CONTINUE
+              commands:
+                - aws s3 cp --recursive --acl public-read ./build s3://${DeployBucket}/
+                - aws s3 cp --acl public-read --cache-control='max-age=0, no-cache, no-store, must-revalidate' ./build/index.html s3://${DeployBucket}/
+                - aws cloudfront create-invalidation --distribution-id ${Distribution} --paths /index.html
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: build
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: build
+  PipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}.pipeline-bucket
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: pipeline-bucket
+  DeployBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}.deploy-bucket
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: deploy-bucket
+  Certificate:
+    Type: Custom::Certificate
+    Properties:
+      ServiceToken: 
+      DomainName: !Sub ${SubDomain}.${DomainName}
+      SubjectAlternativeNames: !If [CreateApexConfig, !Ref DomainName, !Ref AWS::NoValue]
+      Region: !Ref Region
+      ValidationMethod: DNS      
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: certificate
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: CDN for S3 hosted React app.
+        Aliases:
+          - !Ref DomainName
+          - !Join ['.', [!Ref SubDomain, !Ref DomainName]]
+        Origins:
+          - DomainName: !GetAtt DeployBucket.DomainName
+            Id: !Ref DeployBucket
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          MinTTL: 86400
+          MaxTTL: 31536000
+          ForwardedValues:
+            QueryString: true
+          TargetOriginId: !Ref DeployBucket
+          ViewerProtocolPolicy: redirect-to-https
+        HttpVersion: http2
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateARN
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: distribution
+  # CleanDeployBucket:
+  #   Type: Custom::CleanBucket
+  #   Properties:
+  #     ServiceToken: arn:aws:lambda:us-west-2:419106351775:function:clean-bucket
+  #     BucketName: !Ref DeployBucket
+  # CleanPipelineBucket:
+  #   Type: Custom::CleanBucket
+  #   Properties:
+  #     ServiceToken: arn:aws:lambda:us-west-2:419106351775:function:clean-bucket
+  #     BucketName: !Ref PipelineBucket
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-CodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-CodeBuildAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt PipelineBucket.Arn
+                  - !Join ['', [!GetAtt PipelineBucket.Arn, '/*']]
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource:
+                  - !GetAtt DeployBucket.Arn
+                  - !Join ['', [!GetAtt DeployBucket.Arn, '/*']]
+              - 
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - cloudfront:CreateInvalidation
+                Resource: '*'
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: build-role
+  CodePipeLineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-CodePipeLineRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-CodePipelineAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt PipelineBucket.Arn
+                  - !Join ['', [!GetAtt PipelineBucket.Arn, '/*']]
+              - 
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: '*'
+      Tags:
+        - Key: !Sub ${AWS::StackName}
+          Value: pipeline-role
